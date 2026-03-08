@@ -87,6 +87,9 @@ defmodule LassoWeb.Dashboard.Components.ChainDetailsPanel do
         |> assign(:aggregate_cached, aggregate_cached)
         |> assign(:cluster_block_heights, cluster_block_heights)
         |> assign_new(:chain_metrics_region, fn -> "aggregate" end)
+        |> assign_new(:eth_logs_enabled, fn -> false end)
+        |> assign_new(:eth_logs_mode, fn -> "single" end)
+        |> assign(:total_block_range, sum_block_range(chain_connections))
         |> assign(
           :consensus_height,
           find_consensus_height(chain_connections, cluster_block_heights)
@@ -102,6 +105,15 @@ defmodule LassoWeb.Dashboard.Components.ChainDetailsPanel do
   end
 
   @impl true
+  def handle_event("toggle_chain_eth_logs", _params, socket) do
+    {:noreply, update(socket, :eth_logs_enabled, &(!&1))}
+  end
+
+  def handle_event("select_chain_eth_logs_mode", %{"mode" => mode}, socket)
+      when mode in ["single", "distributed", "overlap"] do
+    {:noreply, assign(socket, :eth_logs_mode, mode)}
+  end
+
   def handle_event("select_chain_region", %{"region" => region}, socket) do
     live_provider_metrics = socket.assigns[:live_provider_metrics] || %{}
     aggregate_cached = socket.assigns[:aggregate_cached] || %{}
@@ -159,6 +171,9 @@ defmodule LassoWeb.Dashboard.Components.ChainDetailsPanel do
         selected_profile={@selected_profile}
         chain_connections={@chain_connections}
         chain_endpoints={@selected_chain_endpoints}
+        eth_logs_enabled={@eth_logs_enabled}
+        eth_logs_mode={@eth_logs_mode}
+        myself={@myself}
       />
 
       <div :if={@show_region_tabs} class="mt-4">
@@ -172,7 +187,10 @@ defmodule LassoWeb.Dashboard.Components.ChainDetailsPanel do
         />
       </div>
 
-      <.chain_metrics_strip chain_metrics={@filtered_chain_metrics} />
+      <.chain_metrics_strip
+        chain_metrics={@filtered_chain_metrics}
+        total_block_range={@total_block_range}
+      />
 
       <.routing_decisions_section
         last_decision={@filtered_last_decision}
@@ -242,6 +260,7 @@ defmodule LassoWeb.Dashboard.Components.ChainDetailsPanel do
   defp provider_count_color(_, _), do: "text-yellow-400"
 
   attr(:chain_metrics, :map, required: true)
+  attr(:total_block_range, :integer, default: 0)
 
   defp chain_metrics_strip(assigns) do
     metrics = assigns.chain_metrics
@@ -254,6 +273,7 @@ defmodule LassoWeb.Dashboard.Components.ChainDetailsPanel do
       |> assign(:success, if(success_rate > 0, do: "#{success_rate}%", else: "—"))
       |> assign(:success_class, success_color(success_rate))
       |> assign(:rps, format_rps(Map.get(metrics, :rps, 0.0)))
+      |> assign(:block_range_display, format_block_range(assigns.total_block_range))
 
     ~H"""
     <DetailPanelComponents.panel_section border={false} class="px-6">
@@ -264,6 +284,10 @@ defmodule LassoWeb.Dashboard.Components.ChainDetailsPanel do
         <:metric label="Success" value={@success} value_class={@success_class} />
         <:metric label="RPS" value={@rps} value_class="text-purple-400" />
       </DetailPanelComponents.metrics_strip>
+      <DetailPanelComponents.metrics_strip class="border-x rounded mt-2">
+        <:metric label="eth_getLogs range" value={@block_range_display} value_class="text-sky-400" />
+        <:metric label="blks / parallel req" value="combined" value_class="text-gray-600" />
+      </DetailPanelComponents.metrics_strip>
     </DetailPanelComponents.panel_section>
     """
   end
@@ -272,10 +296,29 @@ defmodule LassoWeb.Dashboard.Components.ChainDetailsPanel do
   defdelegate format_rps(rps), to: Formatting
   defp success_color(rate), do: Formatting.success_rate_color(rate)
 
+  defp format_block_range(0), do: "—"
+  defp format_block_range(nil), do: "—"
+  defp format_block_range(n) when is_integer(n), do: "#{Formatting.format_number(n)} blks"
+
+  defp sum_block_range(connections) do
+    Enum.reduce(connections, 0, fn conn, acc ->
+      limit =
+        conn
+        |> Map.get(:capabilities)
+        |> then(&(&1 && get_in(&1, [:limits, :max_block_range])))
+        |> then(&(&1 || 0))
+
+      acc + limit
+    end)
+  end
+
   attr(:chain, :string, required: true)
   attr(:selected_profile, :string, required: true)
   attr(:chain_connections, :list, required: true)
   attr(:chain_endpoints, :map, required: true)
+  attr(:eth_logs_enabled, :boolean, default: false)
+  attr(:eth_logs_mode, :string, default: "single")
+  attr(:myself, :any, required: true)
 
   defp endpoint_config_section(assigns) do
     has_ws = Enum.any?(assigns.chain_connections, &EndpointHelpers.provider_supports_websocket/1)
@@ -338,6 +381,51 @@ defmodule LassoWeb.Dashboard.Components.ChainDetailsPanel do
             Distributes requests evenly across all available providers
           </div>
         </div>
+      </div>
+
+      <div class="mt-5 pt-4 border-t border-gray-800/60">
+        <div class="flex items-center justify-between mb-3">
+          <label class="text-xs font-semibold uppercase tracking-wider text-gray-500">
+            eth_getLogs Fetch Mode
+          </label>
+          <button
+            phx-click="toggle_chain_eth_logs"
+            phx-target={@myself}
+            class="relative inline-flex h-5 w-9 cursor-pointer rounded-full border border-gray-700 transition-colors focus:outline-none"
+            style={
+              if @eth_logs_enabled,
+                do: "background-color: rgb(99 102 241 / 0.5);",
+                else: "background-color: rgb(31 41 55);"
+            }
+            aria-checked={to_string(@eth_logs_enabled)}
+          >
+            <span
+              class={[
+                "inline-block h-4 w-4 mt-0.5 rounded-full bg-white shadow transition-transform",
+                if(@eth_logs_enabled, do: "translate-x-4", else: "translate-x-0.5")
+              ]}
+            />
+          </button>
+        </div>
+        <%= if @eth_logs_enabled do %>
+          <div class="flex flex-wrap gap-2">
+            <button
+              :for={mode <- ["single", "distributed", "overlap"]}
+              phx-click="select_chain_eth_logs_mode"
+              phx-value-mode={mode}
+              phx-target={@myself}
+              class={[
+                "px-3 py-1.5 rounded-md text-xs font-medium border transition-colors",
+                if(@eth_logs_mode == mode,
+                  do: "bg-indigo-500/20 border-indigo-500/50 text-indigo-300",
+                  else: "bg-gray-800/50 border-gray-700 text-gray-400 hover:text-gray-300"
+                )
+              ]}
+            >
+              {String.capitalize(mode)}
+            </button>
+          </div>
+        <% end %>
       </div>
     </div>
     """
