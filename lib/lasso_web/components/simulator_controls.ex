@@ -27,6 +27,8 @@ defmodule LassoWeb.Dashboard.Components.SimulatorControls do
       |> assign_new(:request_rate, fn -> 5 end)
       |> assign_new(:run_duration, fn -> 30 end)
       |> assign_new(:load_types, fn -> %{http: true, ws: true} end)
+      |> assign_new(:eth_logs_enabled, fn -> false end)
+      |> assign_new(:eth_logs_mode, fn -> "single" end)
       |> assign_new(:recent_calls, fn -> [] end)
       |> assign_new(:available_chains, fn -> [] end)
       |> assign_new(:active_runs, fn -> [] end)
@@ -324,6 +326,17 @@ defmodule LassoWeb.Dashboard.Components.SimulatorControls do
   end
 
   @impl true
+  def handle_event("toggle_eth_logs", _params, socket) do
+    {:noreply, update(socket, :eth_logs_enabled, &(!&1))}
+  end
+
+  @impl true
+  def handle_event("select_eth_logs_mode", %{"mode" => mode}, socket)
+      when mode in ["single", "distributed", "overlap"] do
+    {:noreply, assign(socket, :eth_logs_mode, mode)}
+  end
+
+  @impl true
   def handle_event("update_duration", %{"duration" => duration_str}, socket) do
     duration = String.to_integer(duration_str)
     config = Map.put(socket.assigns.quick_run_config, :duration, duration * 1000)
@@ -383,6 +396,8 @@ defmodule LassoWeb.Dashboard.Components.SimulatorControls do
             rps_limit={@rps_limit}
             load_types={@load_types}
             simulator_running={@simulator_running}
+            eth_logs_enabled={@eth_logs_enabled}
+            eth_logs_mode={@eth_logs_mode}
             myself={@myself}
           />
         </:body>
@@ -566,6 +581,61 @@ defmodule LassoWeb.Dashboard.Components.SimulatorControls do
         </div>
       </div>
       
+    <!-- Event Log Options -->
+      <div class="space-y-2">
+        <div class="flex items-center justify-between">
+          <label class="text-[10px] font-medium text-gray-400">Event Log Options</label>
+          <button
+            phx-click="toggle_eth_logs"
+            phx-target={@myself}
+            class={[
+              "relative inline-flex h-4 w-7 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200",
+              if(@eth_logs_enabled,
+                do: "bg-emerald-500",
+                else: "bg-gray-600"
+              )
+            ]}
+            role="switch"
+            aria-checked={to_string(@eth_logs_enabled)}
+          >
+            <span class={[
+              "pointer-events-none inline-block h-3 w-3 rounded-full bg-white shadow ring-0 transition-transform duration-200",
+              if(@eth_logs_enabled, do: "translate-x-3", else: "translate-x-0")
+            ]} />
+          </button>
+        </div>
+
+        <%= if @eth_logs_enabled do %>
+          <div class="text-[9px] text-gray-500 font-mono truncate">
+            USDC Sepolia · 0x1c7D…7238
+          </div>
+          <div class="grid grid-cols-3 gap-1">
+            <%= for {mode, label, desc} <- [
+              {"single", "Single", "One provider"},
+              {"distributed", "Distributed", "Parallel chunks"},
+              {"overlap", "Overlap", "Cross-verify"}
+            ] do %>
+              <button
+                phx-click="select_eth_logs_mode"
+                phx-value-mode={mode}
+                phx-target={@myself}
+                class={[
+                  "text-[9px] rounded-lg p-1.5 text-left transition-all duration-200",
+                  if(@eth_logs_mode == mode,
+                    do: "bg-teal-500/20 border border-teal-500 text-teal-300",
+                    else:
+                      "border-gray-600/40 bg-gray-800/40 border text-gray-300 hover:border-teal-400/50"
+                  )
+                ]}
+              >
+                <div class="font-medium">{label}</div>
+                <div class="text-gray-500 mt-0.5">{desc}</div>
+              </button>
+            <% end %>
+          </div>
+        <% end %>
+      </div>
+
     <!-- Live Statistics -->
       <div class="bg-gray-800/40 space-y-3 rounded-lg p-3">
         <div class="text-xs font-medium text-gray-300">Live Metrics</div>
@@ -682,8 +752,15 @@ defmodule LassoWeb.Dashboard.Components.SimulatorControls do
   end
 
   defp build_run_config(socket) do
-    %{load_types: load_types, selected_strategy: strategy, selected_profile: profile} =
-      socket.assigns
+    %{
+      load_types: load_types,
+      selected_strategy: strategy,
+      selected_profile: profile,
+      eth_logs_enabled: eth_logs_enabled,
+      eth_logs_mode: eth_logs_mode
+    } = socket.assigns
+
+    methods = ["eth_blockNumber", "eth_getBalance"]
 
     config = %{
       type: "custom",
@@ -692,11 +769,16 @@ defmodule LassoWeb.Dashboard.Components.SimulatorControls do
       chains: get_selected_chains(socket),
       http: %{
         enabled: load_types.http,
-        methods: ["eth_blockNumber", "eth_getBalance"],
+        methods: methods,
         rps: socket.assigns.request_rate,
         concurrency: max(8, socket.assigns.request_rate)
       },
-      ws: %{enabled: load_types.ws, connections: 2, topics: ["newHeads"]}
+      ws: %{enabled: load_types.ws, connections: 2, topics: ["newHeads"]},
+      eth_logs: %{
+        enabled: eth_logs_enabled,
+        mode: eth_logs_mode,
+        address: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+      }
     }
 
     if is_binary(strategy) and strategy != "",
