@@ -24,6 +24,43 @@ function generateId() {
   return `run_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }
 
+function toHex(n) {
+  return "0x" + n.toString(16);
+}
+
+// Builds an eth_getLogs filter for the given mode.
+// - single: small recent range (~100 blocks), passes through without triggering the distributor
+// - distributed: large range (~50,000 blocks), triggers EthLogsDistributor chunking
+// - overlap: TODO — chunked with overlapping windows (not yet implemented server-side)
+function buildEthLogsFilter(mode, address, topics, toBlock) {
+  switch (mode) {
+    case "single":
+      return {
+        address,
+        topics: [topics],
+        fromBlock: toHex(Math.max(0, toBlock - 100)),
+        toBlock: toHex(toBlock),
+      };
+    case "distributed":
+      return {
+        address,
+        topics: [topics],
+        fromBlock: toHex(Math.max(0, toBlock - 50000)),
+        toBlock: toHex(toBlock),
+      };
+    case "overlap":
+      // TODO: implement overlapping chunk strategy server-side
+      return {
+        address,
+        topics: [topics],
+        fromBlock: toHex(Math.max(0, toBlock - 50000)),
+        toBlock: toHex(toBlock),
+      };
+    default:
+      return null;
+  }
+}
+
 // SimulatorRun class - represents a single simulation run
 class SimulatorRun {
   constructor(config) {
@@ -39,6 +76,10 @@ class SimulatorRun {
 
     // WebSocket state
     this.wsSockets = [];
+
+    // eth_getLogs state
+    this.ethLogsTimer = null;
+    this.currentBlock = null; // updated from eth_blockNumber responses
 
     // Per-run statistics
     this.stats = {
@@ -64,6 +105,11 @@ class SimulatorRun {
       this._startWsLoad();
     }
 
+    // Start eth_getLogs load if enabled
+    if (this.config.eth_logs?.enabled) {
+      this._startEthLogsLoad();
+    }
+
     // Set duration timeout if specified
     if (this.config.duration > 0) {
       setTimeout(() => this.stop(), this.config.duration);
@@ -85,6 +131,9 @@ class SimulatorRun {
 
     // Stop WebSocket load
     this._stopWsLoad();
+
+    // Stop eth_getLogs load
+    this._stopEthLogsLoad();
 
     this.state = RunState.STOPPED;
     this._logActivity("run", {
@@ -183,6 +232,12 @@ class SimulatorRun {
 
         if (resp.ok) {
           this.stats.http.success++;
+
+          // Track current block for eth_getLogs range building
+          if (method === "eth_blockNumber" && _json?.result) {
+            this.currentBlock = parseInt(_json.result, 16);
+          }
+
           this._logActivity("http", {
             method,
             chain,
@@ -324,6 +379,107 @@ class SimulatorRun {
       };
 
       this.wsSockets.push(ws);
+    }
+  }
+
+  _startEthLogsLoad() {
+    const ethLogsConfig = this.config.eth_logs;
+    const mode = ethLogsConfig.mode || "single";
+    const address = ethLogsConfig.address;
+    // ERC-20 Transfer(address,address,uint256)
+    const transferTopic =
+      "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+    const chains = this.config.chains || getDefaultChains();
+    const profile = this.config.profile || "default";
+    const strategy = this.config.strategy || "load-balanced";
+
+    // Fire once every 8 seconds — eth_getLogs is expensive, keep it infrequent
+    this.ethLogsTimer = setInterval(async () => {
+      if (this.state !== RunState.RUNNING) return;
+
+      // Wait until we have a current block from eth_blockNumber responses
+      if (!this.currentBlock) return;
+
+      const chain = chains[Math.floor(Math.random() * chains.length)];
+      const toBlock = this.currentBlock;
+      const filter = buildEthLogsFilter(mode, address, transferTopic, toBlock);
+
+      if (!filter) return;
+
+      const body = {
+        jsonrpc: "2.0",
+        id: Math.floor(Math.random() * 1e9),
+        method: "eth_getLogs",
+        params: [filter],
+      };
+
+      const url = `/rpc/profile/${encodeURIComponent(profile)}/${encodeURIComponent(strategy)}/${encodeURIComponent(chain)}`;
+      const start = now();
+
+      this._logActivity("http", {
+        method: "eth_getLogs",
+        chain,
+        status: "started",
+        url,
+        mode,
+        fromBlock: filter.fromBlock,
+        toBlock: filter.toBlock,
+        runId: this.id,
+      });
+
+      try {
+        const resp = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+
+        const json = await resp.json().catch(() => null);
+        const dur = now() - start;
+        const logCount = Array.isArray(json?.result) ? json.result.length : null;
+
+        if (resp.ok) {
+          this.stats.http.success++;
+          this._logActivity("http", {
+            method: "eth_getLogs",
+            chain,
+            status: "success",
+            latency: Math.round(dur),
+            statusCode: resp.status,
+            mode,
+            logCount,
+            runId: this.id,
+          });
+        } else {
+          this.stats.http.error++;
+          this._logActivity("http", {
+            method: "eth_getLogs",
+            chain,
+            status: "error",
+            latency: Math.round(dur),
+            statusCode: resp.status,
+            mode,
+            runId: this.id,
+          });
+        }
+      } catch (error) {
+        this.stats.http.error++;
+        this._logActivity("http", {
+          method: "eth_getLogs",
+          chain,
+          status: "error",
+          error: error.message,
+          mode,
+          runId: this.id,
+        });
+      }
+    }, 8000);
+  }
+
+  _stopEthLogsLoad() {
+    if (this.ethLogsTimer) {
+      clearInterval(this.ethLogsTimer);
+      this.ethLogsTimer = null;
     }
   }
 

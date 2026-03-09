@@ -27,6 +27,7 @@ defmodule Lasso.RPC.RequestPipeline do
 
   alias Lasso.RPC.{
     Channel,
+    EthLogsDistributor,
     RequestContext,
     Selection,
     TransportRegistry
@@ -97,8 +98,12 @@ defmodule Lasso.RPC.RequestPipeline do
     # Build channel source based on options (unifies override vs normal selection)
     channel_source = build_channel_source(opts)
 
-    # Execute the pipeline
-    execute_pipeline(channel_source, ctx)
+    # Distribute eth_getLogs across providers when range exceeds provider limits
+    if method == "eth_getLogs" and EthLogsDistributor.should_distribute?(params, chain, opts) do
+      EthLogsDistributor.execute(chain, params, opts, ctx)
+    else
+      execute_pipeline(channel_source, ctx)
+    end
   end
 
   @spec execute_pipeline(channel_source(), RequestContext.t()) :: result()
@@ -484,7 +489,7 @@ defmodule Lasso.RPC.RequestPipeline do
         strategy: opts.strategy,
         request_id: opts.request_id,
         plug_start_time: opts.plug_start_time,
-        account_id: opts.account_id
+        account_id: Map.get(opts, :account_id)
       )
   end
 

@@ -202,6 +202,7 @@ defmodule Lasso.Providers.Catalog do
             url: provider.url,
             ws_url: provider.ws_url,
             archival: provider.archival,
+            capabilities: provider.capabilities,
             canonical_config: %{
               id: provider.id,
               name: provider.name,

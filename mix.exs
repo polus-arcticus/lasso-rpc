@@ -33,7 +33,10 @@ defmodule Lasso.MixProject do
   def application do
     extra_apps =
       case Mix.env() do
-        :dev -> [:logger, :runtime_tools, :wx, :observer, :tools]
+        :dev ->
+          base = [:logger, :runtime_tools, :tools]
+          # wx/observer are GUI tools, optional on Linux
+          if Code.ensure_loaded?(:wx), do: base ++ [:wx, :observer], else: base
         _ -> [:logger, :runtime_tools]
       end
 
